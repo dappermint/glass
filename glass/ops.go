@@ -56,6 +56,16 @@ func isNumKind(k reflect.Kind) bool {
 }
 
 func binop(op token.Token, x, y reflect.Value) (reflect.Value, error) {
+	if (op == token.EQL || op == token.NEQ) && (!x.IsValid() || !y.IsValid()) {
+		eq, err := nilEqual(x, y)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if op == token.NEQ {
+			eq = !eq
+		}
+		return reflect.ValueOf(eq), nil
+	}
 	if !x.IsValid() || !y.IsValid() {
 		return reflect.Value{}, fmt.Errorf("glass: no value in expression")
 	}
@@ -156,6 +166,23 @@ func binop(op token.Token, x, y reflect.Value) (reflect.Value, error) {
 		}
 	}
 	return reflect.Value{}, fmt.Errorf("glass: invalid operation: %s %s %s", tname(x), op, tname(y))
+}
+
+// nilEqual compares when at least one side is nil (an invalid value).
+// nil == nil holds; a nil-able value equals nil when IsNil reports so.
+func nilEqual(x, y reflect.Value) (bool, error) {
+	if !x.IsValid() && !y.IsValid() {
+		return true, nil
+	}
+	v := x
+	if !v.IsValid() {
+		v = y
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil(), nil
+	}
+	return false, fmt.Errorf("glass: invalid operation: %s compared to nil", tname(v))
 }
 
 func unop(op token.Token, x reflect.Value) (reflect.Value, error) {

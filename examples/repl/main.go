@@ -54,9 +54,10 @@ func main() {
 		return
 	}
 
-	fmt.Println("glass repl. builtins: new(name) types() fields(x) methods(x) len(x) print(...)")
+	fmt.Println("glass repl. builtins: new(name) types() fields(x) methods(x) len append make delete print")
 	fmt.Println("shards: shard(type, name, func(self, ...) {...}) mend(type, name) shards(x)")
 	fmt.Println("advice: advise(type, name, before|after|around, fn) unadvise(type, name)")
+	fmt.Println("cuts:   match(typePat, methodPat) adviseMatch(tPat, mPat, kind, fn) unadviseMatch(tPat, mPat)")
 	fmt.Println("weave:  patch(type, name, fn) unpatch(type, name)")
 	fmt.Println(`try: u := new("user"); u.name = "gopher"; u.Greet("hello")`)
 

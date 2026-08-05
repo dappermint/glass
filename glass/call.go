@@ -13,26 +13,24 @@ import (
 var errType = reflect.TypeOf((*error)(nil)).Elem()
 
 func (in *Interp) evalCall(s *scope, call *ast.CallExpr) (reflect.Value, error) {
-	if call.Ellipsis != token.NoPos {
-		return reflect.Value{}, fmt.Errorf("glass: spread (...) not supported")
-	}
+	spread := call.Ellipsis != token.NoPos
 	switch fun := call.Fun.(type) {
 	case *ast.SelectorExpr:
-		return in.callMethod(s, fun, call.Args)
+		return in.callMethod(s, fun, call.Args, spread)
 	case *ast.Ident:
 		if v, ok := s.lookup(fun.Name); ok {
 			if f, isShardFn := asFuncVal(v); isShardFn {
-				args, err := in.evalArgs(s, call.Args)
+				args, err := in.evalArgs(s, call.Args, spread)
 				if err != nil {
 					return reflect.Value{}, err
 				}
 				return f.call(args)
 			}
 			if v.Kind() == reflect.Func {
-				return in.callHostFunc(s, fun.Name, v, call.Args)
+				return in.callHostFunc(s, fun.Name, v, call.Args, spread)
 			}
 		}
-		return in.callBuiltin(s, fun.Name, call.Args)
+		return in.callBuiltin(s, fun.Name, call.Args, spread)
 	}
 	// anything else (paren'd expressions, immediately-invoked literals)
 	v, err := in.evalExpr(s, call.Fun)
@@ -40,19 +38,19 @@ func (in *Interp) evalCall(s *scope, call *ast.CallExpr) (reflect.Value, error) 
 		return reflect.Value{}, err
 	}
 	if f, ok := asFuncVal(v); ok {
-		args, err := in.evalArgs(s, call.Args)
+		args, err := in.evalArgs(s, call.Args, spread)
 		if err != nil {
 			return reflect.Value{}, err
 		}
 		return f.call(args)
 	}
 	if v.IsValid() && v.Kind() == reflect.Func {
-		return in.callHostFunc(s, "func", v, call.Args)
+		return in.callHostFunc(s, "func", v, call.Args, spread)
 	}
 	return reflect.Value{}, fmt.Errorf("glass: cannot call %s", tname(v))
 }
 
-func (in *Interp) callMethod(s *scope, fun *ast.SelectorExpr, argExprs []ast.Expr) (reflect.Value, error) {
+func (in *Interp) callMethod(s *scope, fun *ast.SelectorExpr, argExprs []ast.Expr, spread bool) (reflect.Value, error) {
 	recv, err := in.evalExpr(s, fun.X)
 	if err != nil {
 		return reflect.Value{}, err
@@ -68,7 +66,7 @@ func (in *Interp) callMethod(s *scope, fun *ast.SelectorExpr, argExprs []ast.Exp
 	if err != nil {
 		return reflect.Value{}, err
 	}
-	args, err := in.evalArgs(s, argExprs)
+	args, err := in.evalArgs(s, argExprs, spread)
 	if err != nil {
 		return reflect.Value{}, err
 	}
@@ -78,9 +76,8 @@ func (in *Interp) callMethod(s *scope, fun *ast.SelectorExpr, argExprs []ast.Exp
 	return core(args)
 }
 
-// coreCallable resolves the underlying implementation for a method name:
-// shards take precedence over compiled methods, so a shard can replace a
-// compiled method at runtime and mend restores it.
+// coreCallable resolves a method name; shards take precedence over compiled
+// methods.
 func (in *Interp) coreCallable(d *gs.Descriptor, recv reflect.Value, name string) (callable, error) {
 	if f, ok := in.shards[d.Name][name]; ok {
 		return func(args []reflect.Value) (reflect.Value, error) {
@@ -108,13 +105,13 @@ func (in *Interp) coreCallable(d *gs.Descriptor, recv reflect.Value, name string
 	}, nil
 }
 
-func (in *Interp) callHostFunc(s *scope, name string, fn reflect.Value, argExprs []ast.Expr) (reflect.Value, error) {
+func (in *Interp) callHostFunc(s *scope, name string, fn reflect.Value, argExprs []ast.Expr, spread bool) (reflect.Value, error) {
 	ft := fn.Type()
 	params := make([]reflect.Type, ft.NumIn())
 	for i := range params {
 		params[i] = ft.In(i)
 	}
-	args, err := in.evalArgs(s, argExprs)
+	args, err := in.evalArgs(s, argExprs, spread)
 	if err != nil {
 		return reflect.Value{}, err
 	}
@@ -136,15 +133,19 @@ func (in *Interp) callHostFunc(s *scope, name string, fn reflect.Value, argExprs
 	case 1:
 		return indirect(out[0]), nil
 	}
-	vals := make([]any, len(out))
+	vals := make(tupleVal, len(out))
 	for i, o := range out {
-		vals[i] = o.Interface()
+		vals[i] = indirect(o)
 	}
 	return reflect.ValueOf(vals), nil
 }
 
-func (in *Interp) callBuiltin(s *scope, name string, argExprs []ast.Expr) (reflect.Value, error) {
-	args, err := in.evalArgs(s, argExprs)
+func (in *Interp) callBuiltin(s *scope, name string, argExprs []ast.Expr, spread bool) (reflect.Value, error) {
+	// make's first argument is type syntax, it cannot go through evalArgs
+	if name == "make" {
+		return in.makeBuiltin(s, argExprs)
+	}
+	args, err := in.evalArgs(s, argExprs, spread)
 	if err != nil {
 		return reflect.Value{}, err
 	}
@@ -252,33 +253,69 @@ func (in *Interp) callBuiltin(s *scope, name string, argExprs []ast.Expr) (refle
 		if args[0].Kind() != reflect.String || args[1].Kind() != reflect.String || args[2].Kind() != reflect.String {
 			return reflect.Value{}, fmt.Errorf("glass: advise wants (typeName, methodName, kind, func)")
 		}
-		kind := args[2].String()
-		if kind != "before" && kind != "after" && kind != "around" {
-			return reflect.Value{}, fmt.Errorf("glass: advice kind must be before, after, or around, got %q", kind)
-		}
-		f, ok := asFuncVal(args[3])
-		if !ok {
-			return reflect.Value{}, fmt.Errorf("glass: advise wants a func literal as fourth arg")
-		}
-		minParams := 1
-		if kind == "around" {
-			minParams = 2
-		}
-		if len(f.params) < minParams {
-			return reflect.Value{}, fmt.Errorf("glass: %s advice needs at least %d params (self%s, ...)", kind, minParams, map[bool]string{true: ", next", false: ""}[kind == "around"])
+		kind, f, err := adviceSpec(args[2], args[3])
+		if err != nil {
+			return reflect.Value{}, err
 		}
 		typeName := args[0].String()
-		d, ok := gs.Lookup(typeName)
-		if !ok {
+		if _, ok := gs.Lookup(typeName); !ok {
 			return reflect.Value{}, fmt.Errorf("%w: %q", gs.ErrNotRegistered, typeName)
 		}
-		m := in.advice[d.Name]
-		if m == nil {
-			m = map[string][]adviceEnt{}
-			in.advice[d.Name] = m
-		}
-		m[args[1].String()] = append(m[args[1].String()], adviceEnt{kind: kind, fn: f})
+		in.addAdvice(typeName, args[1].String(), kind, f)
 		return reflect.Value{}, nil
+
+	case "match":
+		if err := need(2); err != nil {
+			return reflect.Value{}, err
+		}
+		if args[0].Kind() != reflect.String || args[1].Kind() != reflect.String {
+			return reflect.Value{}, fmt.Errorf("glass: match wants (typePattern, methodPattern)")
+		}
+		refs := in.matchMethods(args[0].String(), args[1].String())
+		out := make([]string, len(refs))
+		for i, r := range refs {
+			out[i] = r.Type + "." + r.Method
+		}
+		return reflect.ValueOf(out), nil
+
+	case "adviseMatch":
+		if err := need(4); err != nil {
+			return reflect.Value{}, err
+		}
+		if args[0].Kind() != reflect.String || args[1].Kind() != reflect.String || args[2].Kind() != reflect.String {
+			return reflect.Value{}, fmt.Errorf("glass: adviseMatch wants (typePattern, methodPattern, kind, func)")
+		}
+		kind, f, err := adviceSpec(args[2], args[3])
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		refs := in.matchMethods(args[0].String(), args[1].String())
+		for _, r := range refs {
+			in.addAdvice(r.Type, r.Method, kind, f)
+		}
+		return reflect.ValueOf(len(refs)), nil
+
+	case "unadviseMatch":
+		if err := need(2); err != nil {
+			return reflect.Value{}, err
+		}
+		if args[0].Kind() != reflect.String || args[1].Kind() != reflect.String {
+			return reflect.Value{}, fmt.Errorf("glass: unadviseMatch wants (typePattern, methodPattern)")
+		}
+		total := 0
+		for typeName, m := range in.advice {
+			if !gs.Glob(args[0].String(), typeName) {
+				continue
+			}
+			for method, list := range m {
+				if !gs.Glob(args[1].String(), method) {
+					continue
+				}
+				total += len(list)
+				delete(m, method)
+			}
+		}
+		return reflect.ValueOf(total), nil
 
 	case "unadvise":
 		if err := need(2); err != nil {
@@ -367,11 +404,87 @@ func (in *Interp) callBuiltin(s *scope, name string, argExprs []ast.Expr) (refle
 			return reflect.ValueOf(args[0].Len()), nil
 		}
 		return reflect.Value{}, fmt.Errorf("glass: cannot take len of %s", tname(args[0]))
+
+	case "append":
+		if len(args) < 1 || !args[0].IsValid() || indirect(args[0]).Kind() != reflect.Slice {
+			return reflect.Value{}, fmt.Errorf("glass: append wants a slice first")
+		}
+		out := indirect(args[0])
+		for _, a := range args[1:] {
+			v, err := coerce(indirect(a), out.Type().Elem(), "append")
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			out = reflect.Append(out, v)
+		}
+		return out, nil
+
+	case "delete":
+		if err := need(2); err != nil {
+			return reflect.Value{}, err
+		}
+		m := indirect(args[0])
+		if m.Kind() != reflect.Map {
+			return reflect.Value{}, fmt.Errorf("glass: delete wants a map, got %s", tname(m))
+		}
+		key, err := coerce(args[1], m.Type().Key(), "map key")
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		m.SetMapIndex(key, reflect.Value{})
+		return reflect.Value{}, nil
 	}
 	return reflect.Value{}, fmt.Errorf("glass: undefined function: %s", name)
 }
 
-func (in *Interp) evalArgs(s *scope, exprs []ast.Expr) ([]reflect.Value, error) {
+func (in *Interp) makeBuiltin(s *scope, argExprs []ast.Expr) (reflect.Value, error) {
+	if len(argExprs) < 1 {
+		return reflect.Value{}, fmt.Errorf("glass: make wants a type")
+	}
+	t, err := typeFromExpr(argExprs[0])
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	dims := make([]int, 0, 2)
+	for _, e := range argExprs[1:] {
+		v, err := in.evalExpr(s, e)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if !v.IsValid() || !v.CanInt() || v.Int() < 0 {
+			return reflect.Value{}, fmt.Errorf("glass: make wants a non-negative integer size")
+		}
+		dims = append(dims, int(v.Int()))
+	}
+	switch t.Kind() {
+	case reflect.Slice:
+		n, c := 0, 0
+		if len(dims) > 0 {
+			n = dims[0]
+		}
+		c = n
+		if len(dims) > 1 {
+			c = dims[1]
+		}
+		if c < n || len(dims) > 2 {
+			return reflect.Value{}, fmt.Errorf("glass: bad make sizes")
+		}
+		return reflect.MakeSlice(t, n, c), nil
+	case reflect.Map:
+		n := 0
+		if len(dims) > 0 {
+			n = dims[0]
+		}
+		if len(dims) > 1 {
+			return reflect.Value{}, fmt.Errorf("glass: bad make sizes")
+		}
+		return reflect.MakeMapWithSize(t, n), nil
+	}
+	return reflect.Value{}, fmt.Errorf("glass: cannot make %s", t)
+}
+
+// evalArgs evaluates call arguments; a trailing ... flattens the last one.
+func (in *Interp) evalArgs(s *scope, exprs []ast.Expr, spread bool) ([]reflect.Value, error) {
 	args := make([]reflect.Value, len(exprs))
 	for i, e := range exprs {
 		v, err := in.evalExpr(s, e)
@@ -379,6 +492,16 @@ func (in *Interp) evalArgs(s *scope, exprs []ast.Expr) ([]reflect.Value, error) 
 			return nil, err
 		}
 		args[i] = v
+	}
+	if spread {
+		last := indirect(args[len(args)-1])
+		if !last.IsValid() || (last.Kind() != reflect.Slice && last.Kind() != reflect.Array) {
+			return nil, fmt.Errorf("glass: cannot spread %s", tname(last))
+		}
+		args = args[:len(args)-1]
+		for i := 0; i < last.Len(); i++ {
+			args = append(args, indirect(last.Index(i)))
+		}
 	}
 	return args, nil
 }
@@ -444,5 +567,9 @@ func wrapResults(out []any) reflect.Value {
 	case 1:
 		return reflect.ValueOf(out[0])
 	}
-	return reflect.ValueOf(out)
+	vals := make(tupleVal, len(out))
+	for i, o := range out {
+		vals[i] = reflect.ValueOf(o)
+	}
+	return reflect.ValueOf(vals)
 }

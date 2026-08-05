@@ -98,5 +98,14 @@ func (in *Interp) Eval(src string) (result any, err error) {
 	if !last.IsValid() {
 		return nil, nil
 	}
+	if t, ok := asTuple(last); ok {
+		vals := make([]any, len(t))
+		for i, v := range t {
+			if v.IsValid() {
+				vals[i] = v.Interface()
+			}
+		}
+		return vals, nil
+	}
 	return last.Interface(), nil
 }

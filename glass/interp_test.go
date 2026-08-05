@@ -26,8 +26,17 @@ func (b *box) Sum(ns ...int) int {
 	return t
 }
 
+type crate struct {
+	Weight int `gs:"weight"`
+}
+
+func (c *crate) Hello(greeting string) string { return greeting + " crate" }
+
+func (c *crate) Seal() string { return "sealed" }
+
 func init() {
 	gs.Register[box](gs.WithName("box"))
+	gs.Register[crate](gs.WithName("crate"))
 }
 
 // eval is a test wrapper around Interp.Eval, the interpreter under test.
@@ -44,18 +53,18 @@ func eval(t *testing.T, in *Interp, src string) any {
 func TestArithmetic(t *testing.T) {
 	in := New()
 	cases := map[string]any{
-		"1 + 2*3":       7,
-		"(1 + 2) * 3":   9,
-		"7 % 3":         1,
-		"1 / 2.0":       0.5,
-		"-4 + 1":        -3,
-		`"a" + "b"`:     "ab",
-		"2 > 1":         true,
-		`"x" == "x"`:    true,
-		"!true":         false,
-		"1.5 == 1.5":    true,
-		"'a'":           'a',
-		"3 <= 2":        false,
+		"1 + 2*3":     7,
+		"(1 + 2) * 3": 9,
+		"7 % 3":       1,
+		"1 / 2.0":     0.5,
+		"-4 + 1":      -3,
+		`"a" + "b"`:   "ab",
+		"2 > 1":       true,
+		`"x" == "x"`:  true,
+		"!true":       false,
+		"1.5 == 1.5":  true,
+		"'a'":         'a',
+		"3 <= 2":      false,
 	}
 	for src, want := range cases {
 		if got := eval(t, in, src); got != want {
@@ -166,7 +175,7 @@ func TestIntrospectionBuiltins(t *testing.T) {
 		t.Fatalf("fields(b) = %v", fields)
 	}
 	methods := eval(t, in, "methods(b)").([]string)
-	if strings.Join(methods, ",") != "Hello,SetN,Sum" {
+	if strings.Join(methods, ",") != "Hello,Pair,SetN,Sum" {
 		t.Fatalf("methods(b) = %v", methods)
 	}
 }
@@ -243,7 +252,7 @@ func TestShardLifecycle(t *testing.T) {
 		t.Fatalf("shards(b) = %v", shardNames)
 	}
 	methodNames := eval(t, in, "methods(b)").([]string)
-	if strings.Join(methodNames, ",") != "Double,Hello,SetN,Sum" {
+	if strings.Join(methodNames, ",") != "Double,Hello,Pair,SetN,Sum" {
 		t.Fatalf("methods(b) = %v", methodNames)
 	}
 }
@@ -334,6 +343,154 @@ func TestPatchBuiltin(t *testing.T) {
 	}
 	if _, ok := gs.Hook(&box{}, "Hello"); ok {
 		t.Fatal("patch survived unpatch")
+	}
+}
+
+func TestMatchBuiltin(t *testing.T) {
+	in := New()
+	got := eval(t, in, `match("*", "Hello")`).([]string)
+	if strings.Join(got, ",") != "box.Hello,crate.Hello" {
+		t.Fatalf("match = %v", got)
+	}
+
+	// shards participate in pointcut matching
+	eval(t, in, `shard("box", "Zap", func(self) { return 1 })`)
+	got = eval(t, in, `match("box", "Z*")`).([]string)
+	if strings.Join(got, ",") != "box.Zap" {
+		t.Fatalf("shard match = %v", got)
+	}
+
+	// no match is an empty result, not an error
+	if got := eval(t, in, `match("ghost", "*")`).([]string); len(got) != 0 {
+		t.Fatalf("ghost match = %v, want empty", got)
+	}
+}
+
+func TestAdviseMatch(t *testing.T) {
+	in := New()
+	src := `
+b := new("box")
+b.name = "kit"
+c := new("crate")
+adviseMatch("*", "Hello", "around", func(self, next, g) { return "[" + next(g) + "]" })`
+	if got := eval(t, in, src); got != 2 {
+		t.Fatalf("adviseMatch count = %v, want 2", got)
+	}
+	if got := eval(t, in, `b.Hello("hey")`); got != "[hey kit]" {
+		t.Fatalf("box got %v", got)
+	}
+	if got := eval(t, in, `c.Hello("hey")`); got != "[hey crate]" {
+		t.Fatalf("crate got %v", got)
+	}
+
+	// methods outside the pointcut are untouched
+	if got := eval(t, in, "b.Sum(1, 2)"); got != 3 {
+		t.Fatalf("Sum got %v", got)
+	}
+
+	// unadviseMatch peels advice off every matched method
+	if got := eval(t, in, `unadviseMatch("*", "*")`); got != 2 {
+		t.Fatalf("unadviseMatch = %v, want 2", got)
+	}
+	if got := eval(t, in, `b.Hello("q")`); got != "q kit" {
+		t.Fatalf("restored got %v", got)
+	}
+}
+
+func TestAdviseMatchMixedArity(t *testing.T) {
+	in := New()
+	src := `
+n := 0
+adviseMatch("box", "*", "before", func(self any, rest ...any) { n = n + len(rest) })
+b := new("box")
+b.name = "kit"
+b.Hello("hey")
+b.Sum(1, 2, 3)
+n`
+	// Hello contributes 1 arg, Sum contributes 3
+	if got := eval(t, in, src); got != 4 {
+		t.Fatalf("got %v, want 4", got)
+	}
+}
+
+func TestAdviseMatchShard(t *testing.T) {
+	in := New()
+	src := `
+shard("box", "Zing", func(self) { return "zing" })
+adviseMatch("box", "Zing", "around", func(self, next) { return next() + "!" })
+b := new("box")
+b.Zing()`
+	if got := eval(t, in, src); got != "zing!" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestVariadicFuncLit(t *testing.T) {
+	in := New()
+	src := `
+f := func(first any, rest ...any) {
+	return len(rest)
+}
+f(1, 2, 3)`
+	if got := eval(t, in, src); got != 2 {
+		t.Fatalf("got %v, want 2", got)
+	}
+	if got := eval(t, in, "f(1)"); got != 0 {
+		t.Fatalf("got %v, want 0", got)
+	}
+	if _, err := in.Eval("f()"); err == nil || !strings.Contains(err.Error(), "at least 1") {
+		t.Fatalf("got %v, want arity error", err)
+	}
+	if _, err := in.Eval("g := func(xs ...int) { return len(xs) }\ng(1, 2)"); err != nil {
+		t.Fatalf("named variadic: %v", err)
+	}
+}
+
+func TestSpread(t *testing.T) {
+	in := New()
+	in.Define("xs", []int{1, 2, 3})
+	in.Define("sum", func(ns ...int) int {
+		t := 0
+		for _, n := range ns {
+			t += n
+		}
+		return t
+	})
+
+	if got := eval(t, in, "sum(xs...)"); got != 6 {
+		t.Fatalf("host spread got %v", got)
+	}
+	if got := eval(t, in, "f := func(a, b, c) { return a + b + c }\nf(xs...)"); got != 6 {
+		t.Fatalf("funcVal spread got %v", got)
+	}
+	if got := eval(t, in, "b := new(\"box\")\nb.Sum(xs...)"); got != 6 {
+		t.Fatalf("method spread got %v", got)
+	}
+	if _, err := in.Eval("n := 1\nsum(n...)"); err == nil || !strings.Contains(err.Error(), "spread") {
+		t.Fatalf("got %v, want spread error", err)
+	}
+}
+
+// the universal around advice: variadic params + spread forward any arity
+func TestAdviseMatchForwarding(t *testing.T) {
+	in := New()
+	src := `
+calls := 0
+adviseMatch("box", "*", "around", func(self any, next any, rest ...any) {
+	calls++
+	return next(rest...)
+})
+b := new("box")
+b.name = "kit"
+b.Hello("hey")`
+	if got := eval(t, in, src); got != "hey kit" {
+		t.Fatalf("forwarded Hello got %v", got)
+	}
+	if got := eval(t, in, "b.Sum(1, 2)"); got != 3 {
+		t.Fatalf("forwarded Sum got %v", got)
+	}
+	if got := eval(t, in, "calls"); got != 2 {
+		t.Fatalf("advice ran %v times, want 2", got)
 	}
 }
 
