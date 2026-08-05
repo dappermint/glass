@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/dappermint/glass"
+	"github.com/dappermint/glass/glass"
 )
 
 func main() {

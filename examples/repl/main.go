@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dappermint/glass"
+	"github.com/dappermint/glass/glass"
 	"github.com/dappermint/glass/gs"
 )
 
