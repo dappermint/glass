@@ -84,7 +84,7 @@ var (
 	byType = map[reflect.Type]*Descriptor{}
 )
 
-// Register analyzes struct type T and adds it to the registry. It panics on
+// Register analyses struct type T and adds it to the registry. It panics on
 // non-struct types or conflicting registrations; registration is expected to
 // happen in init, where panicking on programmer error is conventional.
 func Register[T any](opts ...Option) *Descriptor {
