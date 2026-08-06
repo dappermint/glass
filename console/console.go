@@ -22,9 +22,8 @@ import (
 // the one interpreter, so state defined in one connection is visible to the
 // next; evaluations are serialised.
 type Server struct {
-	in   *glass.Interp
-	ln   net.Listener
-	path string
+	in *glass.Interp
+	ln net.Listener
 
 	mu  sync.Mutex // serialises evals and guards out
 	out io.Writer
@@ -36,12 +35,8 @@ type Server struct {
 
 // Serve listens on a unix socket at path and runs a repl session per
 // connection. A nil interp gets a fresh one. The socket is chmodded to
-// 0600, a stale socket left by a dead process is replaced, and print is
-// rebound so its output lands on the session that called it.
+// 0600 and a stale socket left by a dead process is replaced.
 func Serve(path string, in *glass.Interp) (*Server, error) {
-	if in == nil {
-		in = glass.New()
-	}
 	if err := clearStale(path); err != nil {
 		return nil, err
 	}
@@ -53,7 +48,18 @@ func Serve(path string, in *glass.Interp) (*Server, error) {
 		ln.Close()
 		return nil, err
 	}
-	s := &Server{in: in, ln: ln, path: path, conns: map[net.Conn]bool{}}
+	return ServeListener(ln, in), nil
+}
+
+// ServeListener runs the console on a listener the caller made, for
+// transports other than a unix socket: tcp behind auth, a net.Pipe in a
+// test. It rebinds print so output lands on the session that called it,
+// and Close closes the listener.
+func ServeListener(ln net.Listener, in *glass.Interp) *Server {
+	if in == nil {
+		in = glass.New()
+	}
+	s := &Server{in: in, ln: ln, conns: map[net.Conn]bool{}}
 	in.Define("print", func(args ...any) {
 		w := s.out
 		if w == nil {
@@ -62,7 +68,7 @@ func Serve(path string, in *glass.Interp) (*Server, error) {
 		fmt.Fprintln(w, args...)
 	})
 	go s.accept()
-	return s, nil
+	return s
 }
 
 // Interp returns the interpreter behind the socket, for binding live
