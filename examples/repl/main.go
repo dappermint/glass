@@ -3,11 +3,10 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"strings"
 
+	"github.com/dappermint/glass/console"
 	"github.com/dappermint/glass/glass"
 	"github.com/dappermint/glass/gs"
 )
@@ -61,63 +60,8 @@ func main() {
 	fmt.Println("weave:  patch(type, name, fn) unpatch(type, name)")
 	fmt.Println(`try: u := new("user"); u.name = "gopher"; u.Greet("hello")`)
 
-	sc := bufio.NewScanner(os.Stdin)
-	var buf strings.Builder
-	depth := 0
-	prompt := func() {
-		if depth > 0 {
-			fmt.Print("... ")
-		} else {
-			fmt.Print(">> ")
-		}
+	if err := console.Run(in, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	for prompt(); sc.Scan(); prompt() {
-		line := sc.Text()
-		buf.WriteString(line)
-		buf.WriteString("\n")
-		if depth += braceDelta(line); depth > 0 {
-			continue
-		}
-		src := buf.String()
-		buf.Reset()
-		depth = 0
-		if strings.TrimSpace(src) == "" {
-			continue
-		}
-		v, err := in.Eval(src)
-		if err != nil {
-			fmt.Println("error:", err)
-			continue
-		}
-		if v != nil {
-			fmt.Printf("%#v\n", v)
-		}
-	}
-}
-
-// braceDelta tracks brace/paren nesting outside string and char literals so
-// the repl knows when a multi-line block is complete.
-func braceDelta(line string) int {
-	depth := 0
-	var quote rune
-	escaped := false
-	for _, r := range line {
-		switch {
-		case escaped:
-			escaped = false
-		case quote != 0:
-			if r == '\\' {
-				escaped = true
-			} else if r == quote {
-				quote = 0
-			}
-		case r == '"' || r == '\'' || r == '`':
-			quote = r
-		case r == '{' || r == '(':
-			depth++
-		case r == '}' || r == ')':
-			depth--
-		}
-	}
-	return depth
 }
