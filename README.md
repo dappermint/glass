@@ -157,6 +157,18 @@ the details that matter:
 - field writes are not synchronised with the host's goroutines: treat it
   like a debugger, not an api
 
+the session is also drivable from go. `Dial` returns a client whose `Eval`
+round-trips one chunk and hands back what the session printed, so the
+console wiring in your service is testable in ci:
+
+```go
+c, _ := console.Dial("/tmp/app.sock")
+out, _ := c.Eval("stats.hits") // "1042"
+```
+
+`ServeListener` mounts the repl on any `net.Listener` when a unix socket
+is the wrong transport, and `NewClient` wraps whatever conn reaches it.
+
 `examples/console` is the service from the top of this page, runnable.
 
 ## shards
