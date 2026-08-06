@@ -1,16 +1,43 @@
 # glass
 
-go, but reflective. register a type once, then construct, inspect, mutate,
-call, patch, and reinterpret it at runtime, by string name, from inside go
-itself. zero dependencies, zero `unsafe`.
+a console you can attach to a running go service. three lines in main:
+
+```go
+in := glass.New()
+in.Define("stats", stats) // hand it your live objects
+console.Serve("/tmp/app.sock", in)
+```
+
+then, from another terminal, while the service takes traffic:
+
+```
+$ nc -U /tmp/app.sock
+>> stats.hits
+1042
+>> stats.greeting = "oi"
+```
+
+erlang ships a remote shell, rails ships a console, go ships a debugger
+that stops the world. glass closes that gap with three parts that also
+work alone:
 
 - `gs`: a runtime type registry, the type-by-name lookup go threw away
 - `glass`: a go interpreter written in go, running on that registry
+- `console`: that interpreter on a unix socket inside your service
 
-together they can swap methods, wrap methods, and patch compiled call sites
-while the program runs.
+zero dependencies, zero `unsafe`. past poking at state, the parts can swap
+methods, wrap them with advice, and patch compiled call sites while the
+program runs.
 
 ## try it
+
+```
+go run ./examples/console
+```
+
+curl `localhost:8080`, attach with `nc -U /tmp/glass-console.sock`, change
+`stats.greeting`, curl again: the service answers differently without a
+restart. for the interpreter alone, a playground repl:
 
 ```
 nix run github:dappermint/glass
@@ -28,7 +55,8 @@ without nix, `go run ./examples/repl` from a clone does the same.
 
 ## the registry
 
-tag a struct and register it:
+register a type once, then construct, inspect, mutate, and call it at
+runtime by string name. tag a struct and register it:
 
 ```go
 type User struct {
@@ -109,6 +137,27 @@ handling. builtins: `new` `types` `fields` `methods` `len` `append` `make`
 `reflect.Value` already ships `Call`, `Index`, `Len`, `Set`, an entire
 operand api. the stdlib has always contained an interpreter runtime with no
 parser attached. glass is the parser.
+
+## the console
+
+`console.Serve(path, in)` listens on a unix socket and runs a repl per
+connection. unlike a debugger, attaching does not pause the process: the
+service keeps serving while you inspect it, and each eval runs beside the
+traffic. sessions share the one interpreter, so state defined in one
+connection is visible to the next, and a shard or advice applied live
+(next sections) sticks until you remove it. everything below works from
+here, against a running process.
+
+the details that matter:
+
+- the socket is created 0600; anyone who can open it drives the interpreter
+- the console reaches exactly what you registered or bound with `Define`
+- `print` output lands on your session, not the service's stdout
+- a stale socket left by a crash is replaced on the next `Serve`
+- field writes are not synchronised with the host's goroutines: treat it
+  like a debugger, not an api
+
+`examples/console` is the service from the top of this page, runnable.
 
 ## shards
 
@@ -226,6 +275,7 @@ go 1.26 pinned. tests run in the sandbox as the checkPhase, so a green
 | shard | a piece of behaviour broken off the type, attachable at runtime |
 | mend  | put a shadowed method back the way the compiler made it |
 | weave | thread the patchable seam through compiled code |
+| console | the glass, mounted in the side of a running process |
 
 ```
  /\_/\
